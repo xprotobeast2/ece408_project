@@ -3,7 +3,7 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #include <mxnet/base.h>
-#define TILE_WIDTH 16
+#define TILE_WIDTH 32
 namespace mxnet
 {
 namespace op
@@ -23,7 +23,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     const int W_out = W - K + 1;
     
     extern __shared__ float shared_mem[];
-    int X_tile_size = TILE_WIDTH + K-1;
+    int X_tile_size = TILE_WIDTH + K - 1;
     
     //makeshift ceil function
     int W_grid = (int)((W_out-.5)/TILE_WIDTH+.5);
@@ -53,46 +53,37 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
     #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
-        float acc = 0;
+    float acc = 0;
 
-        for(int c = 0; c < C; c++){
-            //load mask elements into shared memory
-            if ((th < K) && (tw < K)) {
-                K_shared[th*K+tw] = k4d(by, c, th, tw);
-            }
-            
-            __syncthreads();
-
-            //load input elements into shared memory
-            for(int i = h; i < h_base + X_tile_size; i+= TILE_WIDTH){
-                for(int j = w; j < w_base + X_tile_size; j += TILE_WIDTH){
-                    if(i < H && j < W){
-                        X_shared[(i-h_base)*X_tile_size+(j-w_base)] = x4d(bx, c, h, w);
-                    } 
-                    else{
-                        X_shared[(i-h_base)*X_tile_size+(j-w_base)] = 0.0f;
-                    }
-                }
-            }
-           
-           __syncthreads();
-            
-            //perform convolution
-            for(int p = 0; p < K; p++){
-                for(int q = 0; q < K; q++){
-                       //load halo elements from global memory
-                       if (h+p >= X_tile_size || w+q >= X_tile_size){
-                           acc += x4d(bx, c, h+p, w+q) * K_shared[p*K+q];
-                       }
-                       //else fetch elements from input tile
-                       else{
-                           acc += X_shared[(th+p)*X_tile_size+(tw+q)] * K_shared[p*K+q];
-                       }
-                }
-            }
-
-            __syncthreads();
+    for(int c = 0; c < C; c++) {
+        //load mask elements into shared memory
+        if ((th < K) && (tw < K)) {
+            K_shared[th*K+tw] = k4d(by, c, th, tw);
         }
+        
+        __syncthreads();
+
+        //load input elements into shared memory
+        for(int i = h; i < h_base + X_tile_size; i+= TILE_WIDTH){
+            for(int j = w; j < w_base + X_tile_size; j += TILE_WIDTH){
+                if(i < H && j < W){
+                    X_shared[(i-h_base)*X_tile_size+(j-w_base)] = x4d(bx, c, i, j);
+                } 
+                else{
+                    X_shared[(i-h_base)*X_tile_size+(j-w_base)] = 0.0f;
+                }
+            }
+        }
+       
+       __syncthreads();
+        
+        //perform convolution
+        for(int p = 0; p < K; p++){
+            for(int q = 0; q < K; q++){
+                acc += X_shared[(th+p)*X_tile_size+(tw+q)] * K_shared[p*K+q];
+            }
+        }
+    }
     
     //only threads with indices in bounds contribute to final output
     if (h < H_out && w < W_out)
@@ -122,15 +113,15 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
-    const int B = x.shape_[0];
-    const int M = y.shape_[1];
-    const int C = x.shape_[1];
-    const int H = x.shape_[2];
-    const int W = x.shape_[3];
-    const int K = w.shape_[3];
+    const int B = x.shape_[0]; // batch index
+    const int M = y.shape_[1]; // output number of channels
+    const int C = x.shape_[1]; // input number of channels 
+    const int H = x.shape_[2]; // input rows
+    const int W = x.shape_[3]; // input columns
+    const int K = w.shape_[3]; // kernel width (assuming square kernel)
     
-    const int W_out = W-K+1;
-    const int H_out = H-K+1;
+    const int W_out = W-K+1;  // output columns
+    const int H_out = H-K+1;  // output rows
     
     const int W_grid = ceil((W_out)/TILE_WIDTH)+1;
     const int H_grid = ceil((H_out)/TILE_WIDTH)+1;
@@ -148,13 +139,6 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     size_t shmem_size = sizeof(float)*(TILE_WIDTH+K-1)*(TILE_WIDTH+K-1)+(K*K)*sizeof(float);
     
     forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K);
-
-    // Set the kernel dimensions
-    // dim3 gridDim(0);
-    // dim3 blockDim(0);
-
-    // Call the kernel
-    // forward_kernel<<<gridDim, blockDim, 0, s>>>(y.dptr_,x.dptr_,w.dptr_, B,M,C,H,W,K);
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
