@@ -4,10 +4,12 @@
 
 #include <mxnet/base.h>
 #define TILE_WIDTH 32
+#define MAX_THREADS 1024
 namespace mxnet
 {
 namespace op
 {
+
 
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
@@ -94,6 +96,55 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 #undef k4d
 }
 
+__global__ void matmult(float *y, const float *x, const int B, const int M, const int C, const int H, const int W, const int K)
+{
+    #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+    #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+    #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+
+    #undef y4d
+    #undef x4d
+    #undef k4d
+}
+
+__global__ void unroll_input(float *y, const float *x, const float *X_unroll, const int B, const int M, const int C, const int H, const int W, const int K)
+{
+    
+    int c, s, h_out, w_out, h_unroll, w_base, p, q;
+
+    const int H_out = H - K + 1;
+    const int W_out = W - K + 1;
+    const int W_unroll = H_out * W_out;
+
+    int t = threadIdx.y + blockDim.y*blockIdx.y;
+    int b = blockIdx.x;
+    
+    if (t < C * W_unroll) {
+        c = t / W_unroll;
+        s = t % W_unroll; 
+        h_out = s / W_out;
+        w_out = s % W_out;
+        h_unroll = h_out * W_out + w_out;
+        w_base = c * K * K;
+
+        #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+
+        for (int p = 0; p < K; p++) {
+            for (int q = 0; q < K; q++) {
+                w_unroll = w_base + p*K + q;
+                X_unroll[h_unroll*(H_out*W_out) + w_unroll] = x4d(b ,c, h_out+p, w_out+q)
+            }
+        }
+    }
+ 
+    #undef y4d
+    #undef x4d
+    #undef k4d
+}
+
+
+
+
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
 // y4d(0,0,0,0) = a
@@ -113,7 +164,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     // Extract the tensor dimensions into B,M,C,H,W,K
     // ...
-    const int B = x.shape_[0]; // batch index
+    const int B = x.shape_[0]; // batch size
     const int M = y.shape_[1]; // output number of channels
     const int C = x.shape_[1]; // input number of channels 
     const int H = x.shape_[2]; // input rows
@@ -133,6 +184,9 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     dim3 gridDim(B, M, Z);
     dim3 blockDim(TILE_WIDTH, TILE_WIDTH, 1);
     
+    dim3 unrollGrid(B, ceil(C*W_out*H_out/(1.0*MAX_THREADS)),1) ;
+    dim3 unrollBlock(1, MAX_THREADS, 1);
+
     //printf("Launching Thread Grid with: \ngridDim: x\t: %d\t y\t: %d\tz\t: %d\n", gridDim.x, gridDim.y, gridDim.z); 
     //printf("blockDim: x\t: %d\ty\t: %d\tz\t: %d\n", blockDim.x, blockDim.y, blockDim.z);
     
