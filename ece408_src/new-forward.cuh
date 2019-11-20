@@ -7,8 +7,6 @@
 #define TILE_SIZE 16 
 #define BATCH_SIZE 512
 #define MAX_THREADS 1024
-#define MAX_THREADS_PER_BLOC
-#define MAX_THREADS_PER_BLOCK
 namespace mxnet
 {
 namespace op
@@ -41,7 +39,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     int ty = threadIdx.y;
     
     float * X_shared = (float*) &shared_mem[0];
-//    float * K_shared = (float*) &shared_mem[X_tile_size*X_tile_size];
+    float * K_shared = (float*) &shared_mem[X_tile_size*X_tile_size];
     
     int th = ty;
     int tw = tx;
@@ -56,17 +54,17 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     
     #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
     #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-    #define k4d(i3, i2, i1, i0) K_mask[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
+    #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
 
     float acc = 0;
 
     for(int c = 0; c < C; c++) {
         //load mask elements into shared memory
-   //     if ((th < K) && (tw < K)) {
-   //         K_shared[th*K+tw] = k4d(by, c, th, tw);
-   //     }
+        if ((th < K) && (tw < K)) {
+            K_shared[th*K+tw] = k4d(by, c, th, tw);
+        }
         
-   //     __syncthreads();
+        __syncthreads();
 
         //load input elements into shared memory
         for(int i = h; i < h_base + X_tile_size; i+= TILE_WIDTH){
@@ -85,10 +83,9 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
         
         //perform convolution
         for(int p = 0; p < K; p++){
-            #pragma unroll 5
             for(int q = 0; q < K; q++){
-                //acc += X_shared[(th+p)*X_tile_size+(tw+q)] * K_shared[p*K+q];
-                acc += X_shared[(th+p)*X_tile_size+(tw+q)] * k4d(by, c, p, q);
+                acc += X_shared[(th+p)*X_tile_size+(tw+q)] * K_shared[p*K+q];
+               // acc += X_shared[(th+p)*X_tile_size+(tw+q)] * k4d(by, c, p, q);
             }
         }
         __syncthreads();
@@ -111,7 +108,7 @@ __global__ void unroll_inputs(const int C, const int H, const int W, const int K
     int W_out = W - K + 1;
     int W_unroll = H_out * W_out;
 
-    int t = threadIdx.x + blockDim.x*blockIdx.x;
+    int t = threadIdx.x + MAX_THREADS*blockIdx.x;
     
     if (t < C * W_unroll) {
         c = t / W_unroll;
@@ -125,18 +122,16 @@ __global__ void unroll_inputs(const int C, const int H, const int W, const int K
 
         for (int p = 0; p < K; p++) {
             for (int q = 0; q < K; q++) {
-                W_unroll = w_base + p*K + q;
-                x_unrolled[h_unroll*(H_out*W_out) + W_unroll] = x4d(b ,c, h_out+p, w_out+q);
+                int w_unroll = w_base + p*K + q;
+                x_unrolled[w_unroll*(H_out*W_out) + h_unroll] = x4d(b ,c, h_out+p, w_out+q);
             }
         }
     }
  
-    #undef y4d
     #undef x4d
-    #undef k4d
 }
 
-__global__ void unroll_weights(const int M, const int C, const int K, const float * w, float * w_unrolled) {
+__global__ void unroll_weights_kernel(const int M, const int C, const int K, const float * w, float * w_unrolled) {
     
 }
 
@@ -170,6 +165,8 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
         } else {
             M[ty][tx] = 0.0;
         }
+        
+
         if((Col < numBColumns) && (tile_x*TILE_WIDTH + ty) < numBRows) {
             N[ty][tx] = B[(tile_x*TILE_WIDTH + ty)*numBColumns + Col];
         } else {
@@ -187,7 +184,7 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
     }
 }
 
-__global__ void reroll_output(int M, int H_out, int W_out, int b, float * y_unrolled, float * y) {
+__global__ void reroll_output_kernel(int M, int H_out, int W_out, int b, float * y_unrolled, float * y) {
 
 }
 
@@ -203,8 +200,9 @@ __global__ void reroll_output(int M, int H_out, int W_out, int b, float * y_unro
 void unroll_input(int C, int H, int W, int K, int b, float * x, float * x_unrolled){
     int H_out = H-K+1;
     int W_out = W-K+1;
-   
-    dim3 unrollGrid(ceil(C*W_out*H_out/(1.0*MAX_THREADS)),1, 1);
+    int num_threads = C*H_out*W_out;
+
+    dim3 unrollGrid(ceil(num_threads/(1.0*MAX_THREADS)),1, 1);
     dim3 unrollBlock(MAX_THREADS, 1, 1);
 
     unroll_inputs<<<unrollGrid, unrollBlock>>>(C, H, W, K, b, x, x_unrolled);
@@ -212,30 +210,28 @@ void unroll_input(int C, int H, int W, int K, int b, float * x, float * x_unroll
 
 void unroll_weights(int M, int C, int K, float * w, float * w_unrolled) {
 
-    dim3 unrollGrid();
-    dim3 unrollBlock();
+    dim3 unrollGrid(ceil((C*K*K*M)/(1.0*MAX_THREADS)),1,1);
+    dim3 unrollBlock(MAX_THREADS,1,1);
 
-    unroll_weights<<<unrollGrid, unrollBlock>>>(M, C, K, w, w_unrolled);
+    unroll_weights_kernel<<<unrollGrid, unrollBlock>>>(M, C, K, w, w_unrolled);
 
 }
 
-void matrixMult(int M, int C, int K, int H_out, int W_out, float *w, float *x, float *y){
-    
+void matrixMult(int M, int C, int K, int b, int H_out, int W_out, float *w, float *x, float *y){ 
     int A_rows = M;
     int A_columns = C * K * K;
     int B_columns = H_out * W_out;
 
-    dim3 dimGrid(ceil(B_columns/(1.0*TILE_SIZE)), ceil(A_rows/(1.0*TILE_SIZE)), 1);
-    dim3 dimBlock(TILE_SIZE, TILE_SIZE, 1);
-    matrixMultiplyShared<<<dimGrid, dimBlock>>>(w, x, y, A_rows, A_columns, A_columns, B_columns, A_rows, B_columns);
+    dim3 dimGrid(ceil(B_columns/(1.0*TILE_WIDTH)), ceil(A_rows/(1.0*TILE_WIDTH)), 1);
+    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+    matrixMultiplyShared<<<dimGrid, dimBlock>>>(w, x, y+b*M*B_columns, A_rows, A_columns, A_columns, B_columns, A_rows, B_columns);
 }
 
 void reroll_output(int M, int H_out, int W_out, int b, float * y_unrolled, float * y) {
-    
-    dim3 rerollGrid();
-    dim3 rerollBlock();
+    dim3 rerollGrid(ceil((M*H_out*W_out)/(1.0*MAX_THREADS)), 1, 1);
+    dim3 rerollBlock(MAX_THREADS, 1,1);
 
-    reroll_output<<<rerollGrid, rerollBlock>>>(M, H_out, W_out, b, y_unrolled, y.dptr_);
+    reroll_output_kernel<<<rerollGrid, rerollBlock>>>(M, H_out, W_out, b, y_unrolled, y);
 }
 
 /* 
@@ -267,6 +263,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_grid = ceil((H_out)/TILE_WIDTH)+1;
     
     const int Z = W_grid*H_grid;
+    const int skip = W_out * H_out;
     //printf("Initializing convolution with params: \nB\t: %d\nM\t: %d\nC\t: %d\nH\t: %d\nW\t: %d\nK\t: %d\n", B, M, C, H, W, K);
     //printf("X_tile_width: %d\n", TILE_WIDTH+K-1);
     
@@ -286,16 +283,17 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     cudaMalloc((void**)&w_unrolled, sizeof(float)*M*C*K*K);
     cudaMalloc((void**)&y_unrolled, sizeof(float)*M*W_out*H_out);
 
-    size_t shmem_size = sizeof(float)*(TILE_WIDTH+K-1)*(TILE_WIDTH+K-1)+(K*K)*sizeof(float);
+    //size_t shmem_size = sizeof(float)*(TILE_WIDTH+K-1)*(TILE_WIDTH+K-1)+(K*K)*sizeof(float);
 
 
     // Loop over all elements in the batch and call unroll functions
     for (int b = 0; b < B; b++) {
         unroll_input(C, H, W, K, b, x.dptr_, x_unrolled);
-        unroll_weights(M,C, K, w.dptr_, w_unrolled);
-        matrixMult(M, C, K, H_out, W_out, w_unrolled, x_unrolled, y_unrolled);
-        reroll_output(M, H_out, W_out, b, y_unrolled, y.dptr_);
-    } 
+        //unroll_weights(M,C, K, w.dptr_, w_unrolled);
+        //matrixMult(M, C, K, H_out, W_out, w_unrolled, x_unrolled, y.dptr_+b*M*H_out*W_out);
+          matrixMult(M, C, K, b, H_out, W_out, w.dptr_, x_unrolled, y.dptr_);
+        // reroll_output(M, H_out, W_out, b, y_unrolled, y.dptr_);
+    }
 
     //forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K);
 
