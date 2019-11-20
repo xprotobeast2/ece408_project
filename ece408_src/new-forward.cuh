@@ -119,16 +119,17 @@ __global__ void unroll_inputs(const int C, const int H, const int W, const int K
         w_base = c * K * K;
 
         #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-
+        #define x2d(i1, i0) x_unrolled[(i1) * (H_out*W_out) + (i0)]
         for (int p = 0; p < K; p++) {
             for (int q = 0; q < K; q++) {
                 int w_unroll = w_base + p*K + q;
-                x_unrolled[w_unroll*(H_out*W_out) + h_unroll] = x4d(b ,c, h_out+p, w_out+q);
+                x2d(w_unroll, h_unroll) = x4d(b, c, h_out+p, w_out+q);
             }
         }
     }
  
     #undef x4d
+    #undef x2d
 }
 
 __global__ void unroll_weights_kernel(const int M, const int C, const int K, const float * w, float * w_unrolled) {
