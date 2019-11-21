@@ -363,7 +363,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
         //matrixMult(M, C, K, H_out, W_out, w_unrolled, x_unrolled, y.dptr_+b*M*H_out*W_out);
         //matrixMult(M, C, K, b, H_out, W_out, w.dptr_, x_unrolled, y.dptr_);
         // reroll_output(M, H_out, W_out, b, y_unrolled, y.dptr_);
-        fusion_launcher(C, M, H, W, K, b, x, x_unrolled, w.dptr_, y.dptr_);
+        fusion_launcher(C, M, H, W, K, b, x.dptr_, x_unrolled, w.dptr_, y.dptr_);
     }
 
     //forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K);
