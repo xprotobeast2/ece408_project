@@ -462,7 +462,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     //}
 
     //forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K);
-    cudaMemcpyToSymbol(k_mask, w.dptr_, C*K*K*M*sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(k_mask, w.dptr_, C*K*K*M*sizeof(float),0, cudaMemcpyHostToDevice);
 
     forward_kernel_const<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, B, M, C, H, W, K);
     cudaFree(x_unrolled);
