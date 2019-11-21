@@ -4,14 +4,13 @@
 
 #include <mxnet/base.h>
 #define TILE_WIDTH 32
-#define TILE_SIZE 16 
+#define MULT_TILE_WIDTH 16 
 #define BATCH_SIZE 512
 #define MAX_THREADS 1024
 namespace mxnet
 {
 namespace op
 {
-__constant__ float K_mask[8*8*8*16];
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
@@ -100,6 +99,71 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 #undef x4d
 #undef k4d
 }
+__global__ void fusionKernel(const int C, const int M, const int H, const int W, const int K, const int b, const float * x, float * x_unroll, const float * k, float * y){
+    __shared__ float V[MULT_TILE_WIDTH][MULT_TILE_WIDTH];
+    __shared__ float N[MULT_TILE_WIDTH][MULT_TILE_WIDTH];
+
+    int c, s, h_out, w_out, h_unroll, w_base;
+    int H_out = H-K+1;
+    int W_out = W-K+1;
+    int W_unroll = H_out * W_out;
+    int A_rows = M;
+    int A_cols = C*K*K;
+    int B_rows = A_cols;
+    int B_cols = W_unroll;
+    int C_rows = A_rows;
+    int C_cols = B_cols;
+
+    int tid = (blockIdx.x+blockIdx.y*gridDim.x)*(blockDim.x*blockDim.y)+(threadIdx.y*blockDim.x)+threadIdx.x;
+    if (tid < C * W_unroll){
+        c = tid/W_unroll;
+        s = tid % W_unroll;
+        h_out = s / W_out;
+        w_out = s % W_out;
+        h_unroll = h_out * W_out + w_out;
+        w_base = c * K * K;
+        #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+        #define x2d(i1, i0) x_unroll[(i1) * (H_out * W_out) + (i0)]
+        //load into x_unroll var...
+        for(int p = 0; p < K; p++){
+            for(int q = 0; q < K; q++){
+                x2d(c*K*K+p*K+q, h_unroll) = x4d(b, c, h_out+p, w_out+q);
+            }
+        }
+    int Row = blockIdx.y * MULT_TILE_WIDTH + threadIdx.y;
+    int Col = blockIdx.x * MULT_TILE_WIDTH + threadIdx.x;
+    float sum = 0.0f;
+    
+    for(int tile_x = 0; tile_x < ceil(A_cols/(1.0*MULT_TILE_WIDTH)); tile_x++){
+        if ((Row < A_rows) && (tile_x*MULT_TILE_WIDTH+threadIdx.x) < A_cols){
+            V[threadIdx.y][threadIdx.x] = x_unroll[Row*A_cols+tile_x*MULT_TILE_WIDTH+threadIdx.x];
+        }
+        else{
+            V[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        //__syncthreads();
+        if ((Col < B_cols) && (tile_x*MULT_TILE_WIDTH+threadIdx.y) < B_rows){
+            N[threadIdx.y][threadIdx.x] = k[(tile_x*MULT_TILE_WIDTH+threadIdx.y)*B_cols+Col];
+        }
+        else{
+            N[threadIdx.y][threadIdx.x] = 0.0f;
+        }
+        __syncthreads();
+        for(int k = 0; k < MULT_TILE_WIDTH; k++){
+            sum += V[threadIdx.y][k] * N[k][threadIdx.x];
+        }
+        __syncthreads();
+    }
+    if (Row < C_rows && Col < C_cols){
+        y[Row * C_cols + Col] = sum;
+    }
+    }
+        #undef x2d
+        #undef x4d
+}
+
+
+
 
 __global__ void unroll_inputs(const int C, const int H, const int W, const int K, const int b, const float * x, float * x_unrolled) {
     int c, s, h_out, w_out, h_unroll, w_base;
@@ -141,10 +205,8 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
                                      int numARows, int numAColumns,
                                      int numBRows, int numBColumns,
                                      int numCRows, int numCColumns) {
-    //@@ Insert code to implement matrix multiplication here
-    //@@ You have to use shared memory for this MP
-    __shared__ float M[TILE_WIDTH][TILE_WIDTH];
-    __shared__ float N[TILE_WIDTH][TILE_WIDTH];
+    __shared__ float M[MULT_TILE_WIDTH][MULT_TILE_WIDTH];
+    __shared__ float N[MULT_TILE_WIDTH][MULT_TILE_WIDTH];
 
     // Need to linearize the block matrix
     int bx = blockIdx.x;
@@ -153,29 +215,29 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
     int ty = threadIdx.y;
 
     // Row and Col of C's element that is being worked on
-    int Row = by*TILE_WIDTH + ty;
-    int Col = bx*TILE_WIDTH + tx;
+    int Row = by*MULT_TILE_WIDTH + ty;
+    int Col = bx*MULT_TILE_WIDTH + tx;
 
     float sum = 0.0;
     // The loop will be over a linearized tile index
-    for (int tile_x = 0; tile_x < ceil(numAColumns/(float)TILE_WIDTH); tile_x++) {
+    for (int tile_x = 0; tile_x < ceil(numAColumns/(float)MULT_TILE_WIDTH); tile_x++) {
     
         // First load the values of M and N that this thread is reponsible for
-        if ((Row < numARows) && (tile_x*TILE_WIDTH + tx) < numAColumns) {
-            M[ty][tx] = A[Row*numAColumns + tile_x*TILE_WIDTH + tx];      
+        if ((Row < numARows) && (tile_x*MULT_TILE_WIDTH + tx) < numAColumns) {
+            M[ty][tx] = A[Row*numAColumns + tile_x*MULT_TILE_WIDTH + tx];      
         } else {
             M[ty][tx] = 0.0;
         }
-        
+        //__syncthreads();
 
-        if((Col < numBColumns) && (tile_x*TILE_WIDTH + ty) < numBRows) {
-            N[ty][tx] = B[(tile_x*TILE_WIDTH + ty)*numBColumns + Col];
+        if((Col < numBColumns) && (tile_x*MULT_TILE_WIDTH + ty) < numBRows) {
+            N[ty][tx] = B[(tile_x*MULT_TILE_WIDTH + ty)*numBColumns + Col];
         } else {
             N[ty][tx] = 0.0;
         }
         // Make sure all threads in block have loaded their values 
         __syncthreads();
-        for (int k = 0; k < TILE_WIDTH; k++) {
+        for (int k = 0; k < MULT_TILE_WIDTH; k++) {
             sum += M[ty][k]*N[k][tx];
         }
         __syncthreads();
@@ -197,7 +259,15 @@ __global__ void reroll_output_kernel(int M, int H_out, int W_out, int b, float *
     - multiply input x weights = output
     - reroll output
 */
-
+ 
+void fusion_launcher(int C, int M, int H, int W, int K, int b, float * x, float * x_unrolled, float *w, float *y){
+    int A_rows = M;
+    int A_cols = C * K * K;
+    int B_cols = (H-K+1)*(W-K+1);
+    dim3 dimGrid(ceil(B_cols/(1.0*MULT_TILE_WIDTH)), ceil(A_rows/(1.0*MULT_TILE_WIDTH)), 1);
+    dim3 dimBlock(MULT_TILE_WIDTH, MULT_TILE_WIDTH, 1);
+    fusionKernel<<<dimGrid, dimBlock>>>(C, M, H, W, K, b, x, x_unrolled, w, y+b*M*B_cols);
+}
 void unroll_input(int C, int H, int W, int K, int b, float * x, float * x_unrolled){
     int H_out = H-K+1;
     int W_out = W-K+1;
@@ -223,8 +293,8 @@ void matrixMult(int M, int C, int K, int b, int H_out, int W_out, float *w, floa
     int A_columns = C * K * K;
     int B_columns = H_out * W_out;
 
-    dim3 dimGrid(ceil(B_columns/(1.0*TILE_WIDTH)), ceil(A_rows/(1.0*TILE_WIDTH)), 1);
-    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+    dim3 dimGrid(ceil(B_columns/(1.0*MULT_TILE_WIDTH)), ceil(A_rows/(1.0*MULT_TILE_WIDTH)), 1);
+    dim3 dimBlock(MULT_TILE_WIDTH, MULT_TILE_WIDTH, 1);
     matrixMultiplyShared<<<dimGrid, dimBlock>>>(w, x, y+b*M*B_columns, A_rows, A_columns, A_columns, B_columns, A_rows, B_columns);
 }
 
@@ -264,7 +334,6 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_grid = ceil((H_out)/TILE_WIDTH)+1;
     
     const int Z = W_grid*H_grid;
-    const int skip = W_out * H_out;
     //printf("Initializing convolution with params: \nB\t: %d\nM\t: %d\nC\t: %d\nH\t: %d\nW\t: %d\nK\t: %d\n", B, M, C, H, W, K);
     //printf("X_tile_width: %d\n", TILE_WIDTH+K-1);
     
@@ -286,18 +355,21 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     //size_t shmem_size = sizeof(float)*(TILE_WIDTH+K-1)*(TILE_WIDTH+K-1)+(K*K)*sizeof(float);
 
-
+ 
     // Loop over all elements in the batch and call unroll functions
     for (int b = 0; b < B; b++) {
-        unroll_input(C, H, W, K, b, x.dptr_, x_unrolled);
+        //unroll_input(C, H, W, K, b, x.dptr_, x_unrolled);
         //unroll_weights(M,C, K, w.dptr_, w_unrolled);
         //matrixMult(M, C, K, H_out, W_out, w_unrolled, x_unrolled, y.dptr_+b*M*H_out*W_out);
-          matrixMult(M, C, K, b, H_out, W_out, w.dptr_, x_unrolled, y.dptr_);
+        //matrixMult(M, C, K, b, H_out, W_out, w.dptr_, x_unrolled, y.dptr_);
         // reroll_output(M, H_out, W_out, b, y_unrolled, y.dptr_);
+        fusion_launcher(C, M, H, W, K, b, x, x_unrolled, w.dptr_, y.dptr_);
     }
 
     //forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K);
-
+    cudaFree(x_unrolled);
+    cudaFree(w_unrolled);
+    cudaFree(y_unrolled);
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
 //    MSHADOW_CUDA_CALL(cudaDeviceReset());
