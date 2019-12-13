@@ -181,7 +181,7 @@ namespace mxnet
             #undef k4d
         }
 
-        __global__ void fusionKernel(const int C, const int M, const int H, const int W, const int K, const int b, const float * x, const float * k, float * y){
+        __global__ void fusionKernel(const int C, const int M, const int H, const int W, const int K, const float * x, const float * k, float * y){
             __shared__ float A[MULT_TILE_WIDTH][MULT_TILE_WIDTH];
             __shared__ float B[MULT_TILE_WIDTH][MULT_TILE_WIDTH];
             int H_out = H - K + 1;
@@ -190,24 +190,24 @@ namespace mxnet
             #define k2d(i1, i0) k[(i1) * (C  * K * K) + (i0)]
             #define y2d(i1, i0) y[(i1) * (H_out * W_out) + (i0) + blockIdx.z * (M * H_out * W_out)]
 
-            int Row = blockIdx.y * MULT_TILE_WIDTH + threadIdx.y;
-            int Col = blockIdx.x * MULT_TILE_WIDTH + threadIdx.x;
+            int row = blockIdx.y * MULT_TILE_WIDTH + threadIdx.y;
+            int col = blockIdx.x * MULT_TILE_WIDTH + threadIdx.x;
             float sum = 0.0f;
             int tile_x = 0;
             while (tile_x < ceil( (C * K * K) / (1.0 * MULT_TILE_WIDTH))) {
-                if ((Row < M) && (tile_x * MULT_TILE_WIDTH + threadIdx.x) < (C * K * K)){
-                    A[threadIdx.y][threadIdx.x] = k2d(Row, tile_x * MULT_TILE_WIDTH + threadIdx.x);
+                if ((row < M) && (tile_x * MULT_TILE_WIDTH + threadIdx.x) < (C * K * K)){
+                    A[threadIdx.y][threadIdx.x] = k2d(row, tile_x * MULT_TILE_WIDTH + threadIdx.x);
                 }
                 else {
                     A[threadIdx.y][threadIdx.x] = 0.0f;
                 }
 
                 int section_idx = threadIdx.y + tile_x * MULT_TILE_WIDTH;
-                if (Col < H_out * W_out && section_idx < C * K * K) {
+                if (col < H_out * W_out && section_idx < C * K * K) {
                     int conv_h = (section_idx/K) % K;
                     int conv_w = section_idx % K;
-                    int h_out = Col / W_out;
-                    int w_out = Col % W_out;
+                    int h_out = col / W_out;
+                    int w_out = col % W_out;
                     int cur_c = section_idx / (K * K);
                     B[threadIdx.y][threadIdx.x] = x3d(cur_c, h_out + conv_h, w_out + conv_w);
                 }
@@ -222,8 +222,8 @@ namespace mxnet
                 __syncthreads();
                 tile_x += 1;
             }
-            if (Row < M && Col < H_out * W_out){
-                y2d(Row, Col) = sum;
+            if (row < M && col < H_out * W_out){
+                y2d(row, col) = sum;
             }
 
             #undef x3d
@@ -326,7 +326,7 @@ namespace mxnet
             int B_cols = (H-K+1)*(W-K+1);
             dim3 dimGrid(ceil(B_cols/(1.0*MULT_TILE_WIDTH)), ceil(A_rows/(1.0*MULT_TILE_WIDTH)), B);
             dim3 dimBlock(MULT_TILE_WIDTH, MULT_TILE_WIDTH, 1);
-            fusionKernel<<<dimGrid, dimBlock>>>(C, M, H, W, K, B, x, w, y);
+            fusionKernel<<<dimGrid, dimBlock>>>(C, M, H, W, K, x, w, y);
         }
         void unroll_input(int C, int H, int W, int K, int B, float * x, float * x_unrolled) {
             int H_out = H-K+1;
