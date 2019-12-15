@@ -2,7 +2,6 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 #include <mxnet/base.h>
 #define TILE_WIDTH 32
-<<<<<<< HEAD
 #define MULT_TILE_WIDTH 32
 #define FUSION_TILE 16
 #define BATCH_SIZE 512
@@ -10,9 +9,7 @@
 #define BUFFER 8*8*12
 #define MASK 0x
 #include<stdio.h>
-=======
 #define MAX_THREADS 1024
->>>>>>> 9a8b0ba8ee9bc612cc07b4b4e9e45b98789e4b33
 namespace mxnet
 {
     namespace op
@@ -29,7 +26,6 @@ namespace mxnet
             const int H_out = H - K + 1;
             const int W_out = W - K + 1;
 
-<<<<<<< HEAD
             extern __shared__ float shared_mem[];
             int X_tile_size = TILE_WIDTH + K - 1;
 
@@ -90,7 +86,9 @@ namespace mxnet
                     for(int q = 0; q < K; q++){
                         acc += X_shared[(th+p) * X_tile_size + (tw+q)] * K_shared[p * K + q];
                     }
-=======
+                }
+            }
+        }
 
 __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
 {
@@ -153,11 +151,11 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
                 } 
                 else{
                     X_shared[(i-h_base)*X_tile_size+(j-w_base)] = 0.0f;
->>>>>>> 9a8b0ba8ee9bc612cc07b4b4e9e45b98789e4b33
                 }
                 __syncthreads();
             }
-
+        }
+    }
 
             //only threads with indices in bounds contribute to final output
             if (h < H_out && w < W_out)
@@ -495,6 +493,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
          #define FUSION_TILE_X 16
          #define FUSION_TILE_Y 8
          #define RATIO_TILE (FUSION_TILE_X/FUSION_TILE_Y)
+         
          __global__ void fusion2_kernel(const int C, const int M, const int H, const int W, const int K, const float * x, const float * k, float * y){
             __shared__ float B[FUSION_TILE_X][FUSION_TILE_X];
             //float out[FUSION_TILE_X] = {};
