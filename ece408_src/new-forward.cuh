@@ -7,8 +7,6 @@
 #define BATCH_SIZE 512
 #define MAX_THREADS 1024
 #define BUFFER 8*8*12
-#define MASK 0x
-#include<stdio.h>
 #define MAX_THREADS 1024
 namespace mxnet
 {
@@ -16,13 +14,13 @@ namespace mxnet
     {
         __global__ void forward_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
         {
-            /*
+    /*        
                Modify this function to implement the forward pass described in Chapter 16.
                We have added an additional dimension to the tensors to support an entire mini-batch
                The goal here is to be correct AND fast.
                We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-             */
-
+             
+*/
             const int H_out = H - K + 1;
             const int W_out = W - K + 1;
 
@@ -90,90 +88,14 @@ namespace mxnet
             }
         }
 
-__global__ void forward2_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
-{
-    /*
-    Modify this function to implement the forward pass described in Chapter 16.
-    We have added an additional dimension to the tensors to support an entire mini-batch
-    The goal here is to be correct AND fast.
-    We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-    */
-    
-    const int H_out = H - K + 1;
-    const int W_out = W - K + 1;
-    
-    extern __shared__ float shared_mem[];
-    int X_tile_size = TILE_WIDTH + K - 1;
-    
-    //makeshift ceil function
-    int W_grid = (int)((W_out-.5)/TILE_WIDTH+.5);
-    
-    //convenience variables
-    int bx = blockIdx.x; 
-    int by = blockIdx.y; 
-    int bz = blockIdx.z;
-    int tx = threadIdx.x; 
-    int ty = threadIdx.y;
-    
-    float * X_shared = (float*) &shared_mem[0];
-    float * K_shared = (float*) &shared_mem[X_tile_size*X_tile_size];
-    
-    int th = ty;
-    int tw = tx;
-    
-    //determine tile start indices
-    int w_base = (bz % W_grid) * TILE_WIDTH;
-    int h_base = (bz / W_grid) * TILE_WIDTH;
-    
-    //assign each thread to an output element
-    int w = w_base+tw;
-    int h = h_base+th;
-    
-    #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
-    #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-    #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
-
-    float acc = 0;
-
-    for(int c = 0; c < C; c++) {
-        //load mask elements into shared memory
-        if ((th < K) && (tw < K)) {
-            K_shared[th*K+tw] = k4d(by, c, th, tw);
-        }
-        
-        __syncthreads();
-
-        //load input elements into shared memory
-        for(int i = h; i < h_base + X_tile_size; i+= TILE_WIDTH){
-            for(int j = w; j < w_base + X_tile_size; j += TILE_WIDTH){
-                if(i < H && j < W){
-                    X_shared[(i-h_base)*X_tile_size+(j-w_base)] = x4d(bx, c, i, j);
-                } 
-                else{
-                    X_shared[(i-h_base)*X_tile_size+(j-w_base)] = 0.0f;
-                }
-                __syncthreads();
-            }
-        }
-    }
-
-            //only threads with indices in bounds contribute to final output
-            if (h < H_out && w < W_out)
-                y4d(bx, by, h, w) = acc; 
-
-#undef y4d
-#undef x4d
-#undef k4d
-        }
-        /*
         __global__ void forward2_kernel(float *y, const float *x, const float *k, const int B, const int M, const int C, const int H, const int W, const int K)
         {
-        *
+        /*
                Modify this function to implement the forward pass described in Chapter 16.
                We have added an additional dimension to the tensors to support an entire mini-batch
                The goal here is to be correct AND fast.
                We have some nice #defs for you below to simplify indexing. Feel free to use them, or create your own.
-             
+          */   
 
             const int H_out = H - K + 1;
             const int W_out = W - K + 1;
@@ -251,7 +173,8 @@ __global__ void forward2_kernel(float *y, const float *x, const float *k, const 
 #undef x4d
 #undef k4d
         }
-*/
+
+
 __global__ void unroll_input(float *y, const float *x, float *X_unroll, const int B, const int M, const int C, const int H, const int W, const int K)
 {
     
@@ -299,8 +222,8 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
    Any code you write should be executed by this function.
    For ECE408, we only expect the float version of the operator to be called, so here we specialize with only floats.
 */
-
-        __global__ void fusionKernel(const int C, const int M, const int H, const int W, const int K, const float * x, const float * k, float * y){
+        //__constant__ float w_mask[12 * 12 * 12 * 12];
+        __global__ void forward3_kernel(const int C, const int M, const int H, const int W, const int K, const float * x, const float * k, float * y){
             __shared__ float A[FUSION_TILE][FUSION_TILE];
             __shared__ float B[FUSION_TILE][FUSION_TILE];
             int H_out = H - K + 1;
@@ -339,19 +262,16 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
             if (row < M && col < H_out * W_out){
                 y2d(row, col) = sum;
             }
-
+ 
             #undef x3d
             #undef k2d
             #undef y2d
         }
-        // W dims: M * (C * K * K)
-        // X dims: (C * K * K) * (H_out * W_out)
-        // Y dims: (M * H_out * W_out)
 
          #define FUSION_TILE_X 16
          #define FUSION_TILE_Y 8
          #define RATIO_TILE (FUSION_TILE_X/FUSION_TILE_Y)
-         
+        /* 
          __global__ void fusion2_kernel(const int C, const int M, const int H, const int W, const int K, const float * x, const float * k, float * y){
             __shared__ float B[FUSION_TILE_X][FUSION_TILE_X];
             //float out[FUSION_TILE_X] = {};
@@ -367,20 +287,13 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
             float sum = 0.0f;
             for (unsigned tile_idx = 0; tile_idx < ceil ( (C * K * K) / (1.0 * FUSION_TILE_X)); tile_idx++) {
                 int offset = tile_idx * FUSION_TILE_X;
-                for (sec = 0; sec < RATIO_TILE; sec++) {
-                    
-                    int section_idx = threadIdx.y + sec * FUSION_TILE_Y;
-                //for (int m = 0; m < FUSION_TILE_X; m++) {
-                    if (section_idx+offset < C * K * K && col_base < H_out * W_out) {
+                int section_idx = tile_idx * FUSION_TILE_Y + threadIdx.y;
+                if (section_idx+offset < C * K * K && col_base < H_out * W_out) {
                         B[section_idx][threadIdx.x] = x3d((section_idx+offset)/(K * K), (col_base/W_out) + (section_idx+offset)%(K * K)/K, (col_base % W_out) + ((section_idx+offset)%(K*K))%K);
                     } else {
                         B[section_idx][threadIdx.x] = 0.0f;
-                    }
-                    //if (section_idx + offset < C * K * K && col_base < H_out * W_out) {
-                        //B[section_idx][threadIdx.x] = x3d((section_idx + offset)/(K * K), (col_base/W_out) + ((section_idx+offset)/K) % K, (col_base % W_out) + (section_idx+offset) % K);
-                    //} else {
-                    //    B[section_idx][threadIdx.x] = 0.0f;
-                }
+ }
+                
                 
 
                 if (row_base < M && offset + threadIdx.x < C * K * K) {
@@ -389,15 +302,11 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
                     reg_w = 0.0f;
                 }
                 __syncthreads();
-                float inc;
                 for (s = 0; s < FUSION_TILE_X; s++) {
                          sum += reg_w * B[s][threadIdx.x];
-                         float acc = 0.0f;
-                         atomicAdd(&acc, sum);
-                         __syncthreads();
-                         printf("%d ", acc);
+                    }
                 }
-            }
+            
 
 
                 if (row_base < M && col_base < H_out * W_out)
@@ -407,7 +316,7 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
 #undef x3d
 #undef k2d
 #undef y2d
-         }
+         }*/
 
         __global__ void unroll_inputs(const int C, const int H, const int W, const int K, const int B, float * x, float * x_unrolled) {
             int c, s, h_out, w_out, h_unroll, w_base;
@@ -502,12 +411,13 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
             int B_cols = (H-K+1)*(W-K+1);
             dim3 dimGrid(ceil(B_cols/(1.0*FUSION_TILE)), ceil(A_rows/(1.0*FUSION_TILE)), B);
             dim3 dimBlock(FUSION_TILE, FUSION_TILE, 1);
-            fusionKernel<<<dimGrid, dimBlock>>>(C, M, H, W, K, x, w, y);
+            forward3_kernel<<<dimGrid, dimBlock>>>(C, M, H, W, K, x, w, y);
         }
+        
         void fusion2_launcher(int C, int M, int H, int W, int K, int B, float *x , float *w, float *y) {
-            dim3 dimGrid(ceil(((H - K + 1) * (W - K + 1))/(1.0 * FUSION_TILE_X)), ceil(M/(1.0 * FUSION_TILE_Y)), B);
-            dim3 dimBlock(FUSION_TILE_X, FUSION_TILE_Y, 1);
-            fusion2_kernel<<<dimGrid, dimBlock>>>(C, M, H, W, K, x, w, y);
+            dim3 dimGrid(ceil(((H - K + 1) * (W - K + 1))/(1.0 * FUSION_TILE)), ceil(M/(1.0 * FUSION_TILE)), B);
+            dim3 dimBlock(FUSION_TILE, FUSION_TILE, 1);
+            forward3_kernel<<<dimGrid, dimBlock>>>(C, M, H, W, K, x, w, y);
         }
 
         void unroll_input(int C, int H, int W, int K, int B, float * x, float * x_unrolled) {
@@ -583,16 +493,16 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
 
 
                 // device memory initializations
-                float * x_unrolled;
-                float * w_unrolled;
-                float * y_unrolled;
+                //float * x_unrolled;
+                //float * w_unrolled;
+                //float * y_unrolled;
 
                 // Allocate device memory
-                cudaMalloc((void**)&x_unrolled, sizeof(float)*C*K*K*W_out*H_out);
-                cudaMalloc((void**)&w_unrolled, sizeof(float)*M*C*K*K);
-                cudaMalloc((void**)&y_unrolled, sizeof(float)*M*W_out*H_out);
+                //cudaMalloc((void**)&x_unrolled, sizeof(float)*C*K*K*W_out*H_out);
+                //cudaMalloc((void**)&w_unrolled, sizeof(float)*M*C*K*K);
+                //cudaMalloc((void**)&y_unrolled, sizeof(float)*M*W_out*H_out);
 
-                size_t shmem_size = sizeof(float)*(TILE_WIDTH+K-1)*(TILE_WIDTH+K-1)+(K*K)*sizeof(float);
+                //size_t shmem_size = sizeof(float)*(TILE_WIDTH+K-1)*(TILE_WIDTH+K-1)+(K*K)*sizeof(float);
                 //forward_kernel<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, w.dptr_, B, M, C, H, W, K);
 
                 // Loop over all elements in the batch and call unroll functions
@@ -606,7 +516,9 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
                 fusion_launcher(C, M, H, W, K, B, x.dptr_, x_unrolled, w.dptr_, y.dptr_);
                 }
                  */
-                //cudaMemcpyToSymbol(k_mask, w.dptr_, C * M * K * K * sizeof(float), 0, cudaMemcpyHostToDevice);
+                
+                /* I wanted to store mask values in constant memory. 
+                //cudaMemcpyToSymbol(w_mask, w.dptr_, C * M * K * K * sizeof(float), 0, cudaMemcpyHostToDevice); */
                 fusion_launcher(C, M, H, W, K, B, x.dptr_, w.dptr_, y.dptr_);
 //                unroll_input(C, H, W, K, B, x.dptr_, x_unrolled);
 //                matrixMult(M, C, K, B, H_out, W_out, w.dptr_, x_unrolled, y.dptr_);
@@ -614,9 +526,9 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
                 //cudaMemcpyToSymbol(k_mask, w.dptr_, C*K*K*M*sizeof(float),0, cudaMemcpyHostToDevice);
 
                 //forward_kernel_const<<<gridDim, blockDim, shmem_size>>>(y.dptr_, x.dptr_, B, M, C, H, W, K);
-                cudaFree(x_unrolled);
-                cudaFree(w_unrolled);
-                cudaFree(y_unrolled);
+                //cudaFree(x_unrolled);
+                //cudaFree(w_unrolled);
+                //cudaFree(y_unrolled);
                 // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
                 MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
                 //    MSHADOW_CUDA_CALL(cudaDeviceReset());
