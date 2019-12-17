@@ -3,7 +3,7 @@
 #include <mxnet/base.h>
 #define TILE_WIDTH 32
 #define MULT_TILE_WIDTH 32
-#define FUSION_TILE 16
+#define FUSION_TILE 32
 #define BATCH_SIZE 512
 #define MAX_THREADS 1024
 #define BUFFER 8*8*12
@@ -223,7 +223,7 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
    For ECE408, we only expect the float version of the operator to be called, so here we specialize with only floats.
 */
         //__constant__ float w_mask[12 * 12 * 12 * 12];
-        __global__ void forward3_kernel(const int C, const int M, const int H, const int W, const int K, const float * x, const float * k, float * y){
+        __global__ void forward3_kernel(const int C, const int M, const int H, const int W, const int K, float * x, float * k, float * y){
             __shared__ float A[FUSION_TILE][FUSION_TILE];
             __shared__ float B[FUSION_TILE][FUSION_TILE];
             int H_out = H - K + 1;
@@ -232,37 +232,55 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
             #define k2d(i1, i0) k[(i1) * (C  * K * K) + (i0)]
             #define y2d(i1, i0) y[(i1) * (H_out * W_out) + (i0) + blockIdx.z * (M * H_out * W_out)]
 
-            int row = blockIdx.y * FUSION_TILE + threadIdx.y;
-            int col = blockIdx.x * FUSION_TILE + threadIdx.x;
-            float sum = 0.0f;
+            int row = blockIdx.y * FUSION_TILE + threadIdx.y*2;
+            int col = blockIdx.x * FUSION_TILE + threadIdx.x*2;
             
+	    float P_val[2][2];
+	    for(int i = 0; i < 2; i++){
+		for(int j = 0; j < 2; j++){
+		    P_val[i][j] = 0.0f;	
+		}
+	    }
+	    //#pragma unroll 4
             for(int tile_idx = 0; tile_idx < ceil( (C * K * K) / (1.0 * FUSION_TILE)); tile_idx++) {
-                if ((row < M) && (tile_idx * FUSION_TILE + threadIdx.x) < (C * K * K)){
-                    A[threadIdx.y][threadIdx.x] = k2d(row, tile_idx * FUSION_TILE + threadIdx.x);
-                }
-                else {
-                    A[threadIdx.y][threadIdx.x] = 0.0f;
-                }
+		for(int j = 0; j < 2; ++j){
+		   for(int i = 0; i < 2; ++i){
+                	if (((row + j) < M) && (tile_idx * FUSION_TILE + threadIdx.x*2 + i) < (C * K * K)){
+                    	    A[threadIdx.y*2+j][threadIdx.x*2+i] = k2d((row+j), tile_idx * FUSION_TILE + threadIdx.x*2 + i);
+                	}
+                	else {
+                    	    A[threadIdx.y*2+j][threadIdx.x*2+i] = 0.0f;
+                	}
 
-                int section_idx = threadIdx.y + tile_idx * FUSION_TILE;
-                if (col < H_out * W_out && section_idx < C * K * K) {
-                    B[threadIdx.y][threadIdx.x] = x3d((section_idx)/(K*K), col/W_out + (section_idx/K) % K, col % W_out + section_idx % K);
-                }
-                else {
-                    B[threadIdx.y][threadIdx.x] = 0.0f;
-                }
+                	int section_idx = threadIdx.y*2 + tile_idx * FUSION_TILE + j;
+                	if ((col + i) < H_out * W_out && section_idx < C * K * K) {
+                    	    B[threadIdx.y*2+j][threadIdx.x*2+i] = x3d((section_idx)/(K*K), (col+i)/W_out + (section_idx/K) % K, (col+i) % W_out + section_idx % K);
+                	}
+                	else {
+                    	    B[threadIdx.y*2+j][threadIdx.x*2+i] = 0.0f;
+                	}
+		    }
+		}
+                __syncthreads();
 
-                __syncthreads();
-                for(int z = 0; z < FUSION_TILE; z++){
-                    sum += A[threadIdx.y][z] * B[z][threadIdx.x];
-                }
-                __syncthreads();
+		for(int k = 0; k < FUSION_TILE; k++){
+		  for(int j = 0; j < 2; j++){
+		    for(int i = 0; i < 2; i++){
+			P_val[j][i] += A[threadIdx.y*2+j][k] * B[k][threadIdx.x*2+i];
+		    }
+		  }
+		}
+		__syncthreads();
+		//#pragma unroll
             }
             
-            if (row < M && col < H_out * W_out){
-                y2d(row, col) = sum;
-            }
- 
+	    for(int j = 0; j < 2; j++){
+		for(int i = 0; i < 2; i++){
+            	    if ((row+j) < M && (col+i) < H_out * W_out){
+                	y2d((row+j), (col+i)) = P_val[j][i];
+            	    }
+		}
+	    }
             #undef x3d
             #undef k2d
             #undef y2d
@@ -410,7 +428,7 @@ __global__ void unroll_input(float *y, const float *x, float *X_unroll, const in
             int A_rows = M;
             int B_cols = (H-K+1)*(W-K+1);
             dim3 dimGrid(ceil(B_cols/(1.0*FUSION_TILE)), ceil(A_rows/(1.0*FUSION_TILE)), B);
-            dim3 dimBlock(FUSION_TILE, FUSION_TILE, 1);
+            dim3 dimBlock(FUSION_TILE/2, FUSION_TILE/2, 1);
             forward3_kernel<<<dimGrid, dimBlock>>>(C, M, H, W, K, x, w, y);
         }
         
